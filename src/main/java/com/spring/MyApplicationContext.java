@@ -2,7 +2,11 @@ package com.spring;
 
 import java.io.File;
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -25,6 +29,9 @@ public class MyApplicationContext {
     //存储BeanDefinition对象
     private ConcurrentHashMap<String,MyBeanDefinition> beanDefinitionMap = new ConcurrentHashMap<>();
 
+    //存储beanPostProcessor对象
+    private List<MyBeanPostProcessor> beanPostProcessorList = new ArrayList<>();
+
     public MyApplicationContext(Class configClass) {
         //接收到配置类
         this.configClass = configClass;
@@ -37,7 +44,7 @@ public class MyApplicationContext {
             String beanName = entry.getKey();
             MyBeanDefinition beanDefinition = entry.getValue();
             if(beanDefinition.getScope().equals("singleton")){
-                Object bean = createBean(beanDefinition);//创建
+                Object bean = createBean(beanName,beanDefinition);//创建
                 singletonObjets.put(beanName,bean);
             }
         }
@@ -49,15 +56,55 @@ public class MyApplicationContext {
      * @param beanDefinition
      * @return
      */
-    public Object createBean(MyBeanDefinition beanDefinition){
-
+    public Object createBean(String beanName,MyBeanDefinition beanDefinition){
         //创建bean
         Class clazz = beanDefinition.getClazz();
         try {
-            return clazz.newInstance();
+            Object instance = clazz.newInstance();
+
+            //依赖注入
+            //遍历实例的所有属性字段
+            for (Field declaredField : clazz.getDeclaredFields()) {
+                //如果字段上面有MyAutowired注解才需要进行注入
+                if(declaredField.isAnnotationPresent(MyAutowired.class)){
+                    //给属性注入值 这里我们只实现按照属性名称注入
+                    Object bean = getBean(declaredField.getName());
+
+                    declaredField.setAccessible(true);//允许修改私有属性
+                    declaredField.set(instance,bean);
+                }
+            }
+
+            //判断类是否实现了MyBeanNameAware接口 Aware回调
+            if(instance instanceof MyBeanNameAware){
+                //向类中的beanName属性注入值
+                ((MyBeanNameAware)instance).setBeanName(beanName);
+            }
+
+            //BeanPostProcessor Bean的前置处理器
+            for (MyBeanPostProcessor beanPostProcessor : beanPostProcessorList) {
+                instance = beanPostProcessor.postProcessBeforeInitialization(instance, beanName);
+            }
+
+
+            //初始化
+            if(instance instanceof MyInitializingBean){
+                //调用对应方法
+                ((MyInitializingBean)instance).afterPropertiesSet();
+            }
+
+            //BeanPostProcessor Bean的后置处理器
+            for (MyBeanPostProcessor beanPostProcessor : beanPostProcessorList) {
+                instance = beanPostProcessor.postProcessAfterInitialization(instance, beanName);
+            }
+
+
+            return instance;
         } catch (InstantiationException e) {
             e.printStackTrace();
         } catch (IllegalAccessException e) {
+            e.printStackTrace();
+        } catch (Exception e) {
             e.printStackTrace();
         }
         return null;
@@ -88,6 +135,14 @@ public class MyApplicationContext {
                 Class<?> clazz = null;
                 try {
                     clazz = classLoader.loadClass(path + "." + f.getName().replace(".class",""));
+
+                    //判断当前类是否是一个BeanPostProcessor,即判断当前类是否实现了MyBeanPostProcessor接口
+                    if(MyBeanPostProcessor.class.isAssignableFrom(clazz)){
+                        //得到BeanPostProcessor对象
+                        MyBeanPostProcessor beanPostProcessor = (MyBeanPostProcessor) clazz.getDeclaredConstructor().newInstance();
+                        beanPostProcessorList.add(beanPostProcessor);//存储到list中
+                    }
+
                     //判断类上面是否包含MyComponent注解
                     if(clazz.isAnnotationPresent(MyComponent.class)){
                         //当前类是一个Bean 判断当前Bean的作用域是单例还是多例
@@ -113,6 +168,14 @@ public class MyApplicationContext {
                     }
                 } catch (ClassNotFoundException e) {
                     e.printStackTrace();
+                } catch (InvocationTargetException e) {
+                    e.printStackTrace();
+                } catch (InstantiationException e) {
+                    e.printStackTrace();
+                } catch (IllegalAccessException e) {
+                    e.printStackTrace();
+                } catch (NoSuchMethodException e) {
+                    e.printStackTrace();
                 }
             }
         }
@@ -131,7 +194,7 @@ public class MyApplicationContext {
                 return singletonObjets.get(beanName);
             }else{//多例
                 //创建bean
-                return createBean(beanDefinition);
+                return createBean(beanName,beanDefinition);
             }
         }else{
             throw new Exception("bean " + beanName + " 不存在");
